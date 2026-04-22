@@ -5,32 +5,25 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export function createSlackApp(): App {
-  const receiver = process.env.NODE_ENV === 'production' 
-    ? new HTTPReceiver({
-        signingSecret: process.env.SLACK_SIGNING_SECRET!,
-        endpoints: {
-          events: '/api/slack',
-          commands: '/api/slack',
-          actions: '/api/slack',
-        },
-      })
-    : new ExpressReceiver({
-        signingSecret: process.env.SLACK_SIGNING_SECRET!,
-        endpoints: ['/slack/events', '/slack/commands'],
-      });
-
-  const app = new App({
-    token: process.env.SLACK_BOT_TOKEN,
-    receiver,
-    appToken: process.env.SLACK_APP_TOKEN, // for socket mode if used
-    socketMode: false,
-    developerMode: process.env.NODE_ENV !== 'production',
+  // This is used for local development only now.
+  // Production uses a dedicated handler in api/slack.ts
+  const receiver = new ExpressReceiver({
+    signingSecret: process.env.SLACK_SIGNING_SECRET!,
+    endpoints: {
+      events: '/slack/events',
+      commands: '/slack/commands',
+      actions: '/slack/actions',
+    },
   });
 
-  // Register all commands and listeners
+  const app = new App({
+    token: process.env.SLACK_BOT_TOKEN!,
+    receiver,
+    socketMode: false,
+  });
+
   registerCommands(app);
 
-  // Global error handler
   app.error(async (error) => {
     console.error('❌ Slack App Error:', error);
   });

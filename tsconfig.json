@@ -15,7 +15,6 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": true,
     "noEmitOnError": true,
     "declaration": true,
     "sourceMap": true

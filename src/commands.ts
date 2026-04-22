@@ -1,4 +1,4 @@
-import { App } from '@slack/bolt';
+import { App, Block, KnownBlock } from '@slack/bolt';
 import { XService } from './services/x.js';
 import GrokService from './services/grok.js';
 import { sendXLoginDM } from './oauth.js';
@@ -71,7 +71,7 @@ export function registerCommands(app: App) {
         },
       ];
 
-      recommendations.forEach((rec, index) => {
+      recommendations.forEach((rec, _index) => {
         const b = rec.bookmark;
         const scoreColor = rec.score >= 85 ? '🟢' : rec.score >= 70 ? '🟡' : '🔴';
         const excerpt = b.text.length > 180 ? b.text.substring(0, 177) + '...' : b.text;
@@ -219,7 +219,7 @@ export function registerCommands(app: App) {
   });
 
   // Handle interactivity if needed (e.g. buttons)
-  app.action(/open_x_.*/, async ({ action, ack }) => {
+  app.action(/open_x_.*/, async ({ ack }) => {
     await ack(); // just acknowledge URL buttons don't need more
   });
 

@@ -4,7 +4,7 @@ import { handleOAuthCallback } from '../../src/oauth.js';
 
 const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN);
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   if (req.method !== 'GET') {
     return res.status(405).send('Method not allowed');
   }
