@@ -59,7 +59,7 @@ export class XService {
         params.pagination_token = paginationToken;
       }
 
-      const response = await this.client!.v2.get(`2/users/${this.userId}/bookmarks`, params) as any;
+      const response = await this.client!.v2.get(`users/${this.userId}/bookmarks`, params) as any;
 
       if (response.data && response.data.length > 0) {
         for (const tweet of response.data) {
