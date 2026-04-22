@@ -116,6 +116,59 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
   }
 }
 
+/**
+ * Refresh an expired X access token using the stored refresh token.
+ * Returns the new access token or null if refresh is not possible (requires re-auth).
+ */
+export async function refreshXAccessToken(slackUserId: string): Promise<string | null> {
+  const tokens = await storage.getUserTokens(slackUserId);
+  if (!tokens?.xRefreshToken) {
+    console.warn(`[OAuth] No refresh token for ${slackUserId}; re-auth required`);
+    return null;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: tokens.xRefreshToken,
+      client_id: process.env.X_CLIENT_ID!,
+    });
+
+    const response = await fetch(X_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(`${process.env.X_CLIENT_ID}:${process.env.X_CLIENT_SECRET}`).toString('base64')}`,
+      },
+      body: params.toString(),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('[OAuth] Refresh failed:', response.status, errText);
+      return null;
+    }
+
+    const tokenData = (await response.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in: number;
+    };
+
+    await storage.saveUserTokens(slackUserId, {
+      xAccessToken: tokenData.access_token,
+      xRefreshToken: tokenData.refresh_token ?? tokens.xRefreshToken,
+      xTokenExpiresAt: Date.now() + tokenData.expires_in * 1000,
+    });
+
+    console.log(`[OAuth] Refreshed X token for ${slackUserId}`);
+    return tokenData.access_token;
+  } catch (err) {
+    console.error('[OAuth] Refresh exception:', err);
+    return null;
+  }
+}
+
 // Slack action to send login button via DM
 export async function sendXLoginDM(client: WebClient, slackUserId: string): Promise<void> {
   const authUrl = await createAuthUrl(slackUserId);

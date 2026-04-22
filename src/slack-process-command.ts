@@ -140,7 +140,7 @@ export async function processSlackCommand(params: Record<string, string>): Promi
       });
 
       const { XService } = await import('./services/x.js');
-      const xService = new XService(tokens.xAccessToken);
+      const xService = new XService(tokens.xAccessToken, user_id);
       await xService.initialize();
       const bookmarks = await xService.getAllBookmarks(true, user_id);
 
@@ -170,7 +170,7 @@ export async function processSlackCommand(params: Record<string, string>): Promi
 
       const { XService } = await import('./services/x.js');
       const { GrokService } = await import('./services/grok.js');
-      const xService = new XService(tokens.xAccessToken);
+      const xService = new XService(tokens.xAccessToken, user_id);
       await withTimeout(
         (async () => {
           await xService.initialize();
@@ -334,18 +334,68 @@ export async function processSlackCommand(params: Record<string, string>): Promi
     const message = error instanceof Error ? error.message : String(error);
     console.error('[processCommand] Error:', error);
     const ru = params.response_url;
-    if (ru) {
+    if (!ru) return;
+
+    const looksLikeXAuthExpired =
+      /401|Unauthorized|Xの認証が期限切れ|Invalid or expired token/i.test(message);
+
+    if (looksLikeXAuthExpired) {
       try {
-        await sendDelayedResponse(ru, {
-          response_type: 'ephemeral',
-          replace_original: true,
-          text: shrinkMrkdwn(
-            `❌ エラー: ${message}\n\n*よくある原因:* ・Grok クレジット残高 / X API プラン ・重い \`/bookmark\`（クエリ短縮、先に \`/bookmark-sync\`）`
-          ),
-        });
+        const { createAuthUrl } = await import('./oauth.js');
+        const authUrl = await createAuthUrl(params.user_id);
+        await sendDelayedResponse(
+          ru,
+          {
+            response_type: 'ephemeral',
+            replace_original: true,
+            blocks: [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text:
+                    '⚠️ *Xの認証が期限切れ/無効* になりました。\n' +
+                    'X OAuth 2.0 のアクセストークンは約2時間で失効します。下のボタンから再ログインしてください。',
+                },
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Xで再ログイン 🔐', emoji: true },
+                    style: 'primary',
+                    url: authUrl,
+                  },
+                ],
+              },
+              {
+                type: 'context',
+                elements: [
+                  { type: 'mrkdwn', text: `元のエラー: \`${shrinkMrkdwn(message, 400)}\`` },
+                ],
+              },
+            ],
+            text: 'Xの認証が期限切れです。再ログインしてください。',
+          },
+          { label: 'x-reauth' }
+        );
+        return;
       } catch (e) {
-        console.error('[processCommand] response_url 失敗', e);
+        console.error('[processCommand] 再ログインブロック送信失敗', e);
       }
+    }
+
+    try {
+      await sendDelayedResponse(ru, {
+        response_type: 'ephemeral',
+        replace_original: true,
+        text: shrinkMrkdwn(
+          `❌ エラー: ${message}\n\n*よくある原因:* ・Xの認証期限切れ（/bookmark から再ログイン） ・Grok クレジット残高 / X API プラン ・重い \`/bookmark\`（クエリ短縮、先に \`/bookmark-sync\`）`
+        ),
+      });
+    } catch (e) {
+      console.error('[processCommand] response_url 失敗', e);
     }
   }
 }
