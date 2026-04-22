@@ -30,88 +30,98 @@ export class GrokService {
       .slice(0, 50);
 
     const bookmarkList = limitedBookmarks.map((b, index) => ({
-      id: b.id,
+      bookmark_id: b.id,
       rank: index + 1,
-      text: b.text.substring(0, 200), // truncate for prompt
+      text: b.text.substring(0, 200),
       author: `@${b.authorUsername}`,
       date: new Date(b.createdAt).toLocaleDateString('ja-JP'),
       metrics: b.metrics ? `いいね:${b.metrics.likeCount} RT:${b.metrics.retweetCount}` : '',
     }));
 
-    const prompt = `あなたは優秀なX(Twitter)ブックマーク推薦AIです。
-ユーザーの「${query}」という要件に基づいて、以下のブックマークを関連度でランキングしてください。
+    const bookmarksText = JSON.stringify(bookmarkList, null, 2);
 
-**要件**: ${query}
+    const systemPrompt = `あなたは優秀なブックマーク推薦アシスタントです。
+ユーザーのクエリに対して、提供された${limitedBookmarks.length}件のブックマークから**本当に関連性の高いものだけ**を厳しく選んでください。
 
-**ブックマーク一覧**:
-${JSON.stringify(bookmarkList, null, 2)}
-
-**指示**:
-1. 各ブックマークの関連度を0-100の整数スコアで評価（100が完全一致）
-2. 日本語で簡潔な理由を付けてください（最大30文字）
-3. ユーザーの要件に最も関連する上位8件を選択
-4. 投稿の文脈、トピック、著者の専門性、タイミングなどを考慮
-5. JSON形式で正確に出力してください
-
-出力形式（JSON配列）:
-[
-  {
-    "id": "tweet_id",
-    "score": 94,
-    "reason": "要件の核心であるAI技術について詳細に議論している",
-    "relevanceExplanation": "詳細な説明"
-  },
-  ...
-]
+重要なルール：
+- 関連度スコアは0〜100の整数で、**ばらつきを大きくつける**（本当にマッチするものは80以上、微妙なものは50以下にする）。
+- 同じような内容のブックマークは重複を避け、多様性を出す。
+- クエリとの関連性を具体的に理由付けして評価。
+- 上位8件のみをJSONで返し、関連度が高い順にソート。
 
 関連度の基準:
-- 95-100: 完璧に一致、要件の核心を捉えている
+- 95-100: 完璧に一致、クエリの核心を捉えている
 - 80-94: 強く関連、主要な要素を含む
 - 60-79: 部分的に関連
 - 40-59: 少し関連
-- <40: 無関係
+- <40: 無関係（選ばない）
 
-JSONのみで返答してください。追加のテキストは一切含めないでください。`;
+出力は必ず以下のJSON形式で（追加のテキストは一切含めない）：
+{
+  "recommendations": [
+    {
+      "bookmark_id": "...",
+      "score": 92,
+      "reason": "クエリの内容と完全に一致する具体的な技術事例が記載されている",
+      "relevance_explanation": "詳細な説明"
+    }
+  ]
+}`;
+
+    const userPrompt = `クエリ: ${query}
+
+以下のブックマークからおすすめを抽出してください：
+${bookmarksText}
+`;
 
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'grok-beta', // or 'grok-2-1212' depending on availability
+        model: 'grok-beta',
         messages: [
-          { 
-            role: 'system', 
-            content: 'あなたは正確なJSONのみを出力するAIアシスタントです。ユーザーのクエリに基づいてブックマークをランキングします。' 
-          },
-          { role: 'user', content: prompt }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
         ],
-        temperature: 0.1, // low for consistent JSON
+        temperature: 0.3,
         max_tokens: 4000,
         response_format: { type: 'json_object' },
       });
 
       const content = completion.choices[0]?.message?.content || '{}';
-      let parsed: Array<{id: string; score: number; reason: string; relevanceExplanation?: string}>;
+      let items: Array<{
+        bookmark_id?: string;
+        id?: string;
+        score: number;
+        reason: string;
+        relevance_explanation?: string;
+        relevanceExplanation?: string;
+      }> = [];
 
       try {
-        parsed = JSON.parse(content);
-        if (!Array.isArray(parsed)) {
-          parsed = [parsed]; // fallback
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed?.recommendations)) {
+          items = parsed.recommendations;
+        } else if (Array.isArray(parsed)) {
+          items = parsed;
+        } else if (parsed && typeof parsed === 'object') {
+          const firstArray = Object.values(parsed).find((v) => Array.isArray(v));
+          if (firstArray) items = firstArray as any[];
         }
       } catch (e) {
         console.error('[Grok] Failed to parse JSON:', content);
-        // Fallback to simple ranking by length or recency
         return this.fallbackRanking(query, limitedBookmarks);
       }
 
       const recommendations: Recommendation[] = [];
 
-      for (const item of parsed.slice(0, 8)) {
-        const bookmark = limitedBookmarks.find(b => b.id === item.id) || limitedBookmarks[0];
+      for (const item of items.slice(0, 8)) {
+        const id = item.bookmark_id || item.id;
+        const bookmark = limitedBookmarks.find((b) => b.id === id);
         if (bookmark) {
           recommendations.push({
             bookmark,
-            score: Math.min(100, Math.max(0, item.score || 75)),
+            score: Math.min(100, Math.max(0, Math.round(item.score) || 70)),
             reason: item.reason || '関連性が高いブックマーク',
-            relevanceExplanation: item.relevanceExplanation,
+            relevanceExplanation: item.relevance_explanation || item.relevanceExplanation,
           });
         }
       }
