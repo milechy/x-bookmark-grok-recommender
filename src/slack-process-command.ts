@@ -4,6 +4,7 @@
  */
 import { WebClient } from '@slack/web-api';
 import type { Recommendation } from './types.js';
+import { DebugLogger, newReqId } from './debug-log.js';
 
 // Slack: mrkdwn はおおよそ 1 万文字制限。section text は安全のため切り詰め
 const MAX_SECTION_TEXT = 2800;
@@ -95,15 +96,21 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   });
 }
 
-export async function processSlackCommand(params: Record<string, string>): Promise<void> {
+export async function processSlackCommand(
+  params: Record<string, string>,
+  reqId?: string
+): Promise<void> {
   const { command, text, user_id, response_url } = params;
-  console.log(`[Slack] Processing ${command} for user ${user_id}`);
+  const log = new DebugLogger(reqId ?? newReqId('proc'));
+  await log.info('processSlackCommand start', { command, user_id, text_len: (text || '').length }, 'proc');
 
   try {
+    await log.info('dynamic import: storage+oauth', undefined, 'proc');
     const { storage } = await import('./storage.js');
     const { createAuthUrl } = await import('./oauth.js');
 
     const tokens = await storage.getUserTokens(user_id);
+    await log.info('tokens fetched', { hasTokens: !!tokens, hasRefresh: !!tokens?.xRefreshToken }, 'proc');
 
     if (!tokens) {
       const authUrl = await createAuthUrl(user_id);
@@ -168,9 +175,11 @@ export async function processSlackCommand(params: Record<string, string>): Promi
           `X からブックマークを読み込み中です（進捗はこの下に追記されます）⏳`
       );
 
+      await log.info('dynamic import: XService+GrokService', undefined, 'bookmark');
       const { XService } = await import('./services/x.js');
       const { GrokService } = await import('./services/grok.js');
       const xService = new XService(tokens.xAccessToken, user_id);
+      await log.info('xService.initialize() start', undefined, 'x');
       await withTimeout(
         (async () => {
           await xService.initialize();
@@ -178,11 +187,13 @@ export async function processSlackCommand(params: Record<string, string>): Promi
         45_000,
         'X ユーザー初期化',
       );
+      await log.info('xService.initialize() done', undefined, 'x');
       const bookmarks = await withTimeout(
         xService.getAllBookmarks(false, user_id),
         150_000,
         'X ブックマーク取得',
       );
+      await log.info('bookmarks fetched', { count: bookmarks.length }, 'x');
 
       if (bookmarks.length === 0) {
         await sendDelayedResponse(response_url, {
@@ -216,11 +227,16 @@ export async function processSlackCommand(params: Record<string, string>): Promi
 
       let recommendations: Recommendation[];
       try {
+        await log.info('Grok rankBookmarks start', { model: grokModel, input_count: bookmarks.length }, 'grok');
         recommendations = await withTimeout(
           grok.rankBookmarks(query, bookmarks),
           150_000,
           'Grok 分析',
         );
+        await log.info('Grok rankBookmarks done', { recs: recommendations.length }, 'grok');
+      } catch (e) {
+        await log.error('Grok rankBookmarks failed', e, 'grok');
+        throw e;
       } finally {
         if (longWaitTimer !== undefined) {
           clearTimeout(longWaitTimer);
@@ -305,6 +321,7 @@ export async function processSlackCommand(params: Record<string, string>): Promi
         .join('\n\n');
 
       try {
+        await log.info('sending final blocks', { blocks: finalBlocks.length }, 'result');
         await sendDelayedResponse(
           response_url,
           {
@@ -315,8 +332,9 @@ export async function processSlackCommand(params: Record<string, string>): Promi
           },
           { label: 'blocks' }
         );
+        await log.info('final blocks delivered', undefined, 'result');
       } catch (e) {
-        console.error('[Slack] Block Kit 失敗。テキストのみ再送', e);
+        await log.error('Block Kit failed, text fallback', e, 'result');
         await sendDelayedResponse(
           response_url,
           {
@@ -332,7 +350,7 @@ export async function processSlackCommand(params: Record<string, string>): Promi
     }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error('[processCommand] Error:', error);
+    await log.error('processSlackCommand failed', error, 'proc');
     const ru = params.response_url;
     if (!ru) return;
 

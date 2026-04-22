@@ -9,6 +9,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
 import { waitUntil } from '@vercel/functions';
+import { DebugLogger, newReqId } from '../src/debug-log.js';
 
 export const config = {
   api: {
@@ -67,7 +68,9 @@ async function readRawBodyStream(req: VercelRequest): Promise<string> {
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   const t0 = Date.now();
-  console.log(`[Slack] ${req.method} ${req.url}`);
+  const reqId = newReqId('slack');
+  const log = new DebugLogger(reqId);
+  void log.info(`${req.method} ${req.url}`, undefined, 'entry');
 
   if (req.method === 'GET') {
     res.status(200).json({
@@ -89,11 +92,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // Slack リトライは即 200（重複実行を避ける）
   const retryNum = req.headers['x-slack-retry-num'];
   const retryReason = req.headers['x-slack-retry-reason'];
   if (retryNum) {
-    console.log(`[Slack] retry ignored: num=${retryNum} reason=${retryReason}`);
+    void log.warn('Slack retry ignored', { retryNum, retryReason }, 'retry');
     res.writeHead(200, { 'Content-Length': '0' });
     res.end();
     return;
@@ -103,22 +105,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   try {
     const rawBody = await readRawBodyStream(req);
     if (!rawBody) {
-      console.error('[Slack] Empty body');
+      void log.error('Empty body', undefined, 'body');
       res.status(400).send('Bad request');
       return;
     }
-    console.log(`[Slack] rawBody ready (${rawBody.length} bytes, +${Date.now() - t0}ms)`);
+    void log.info(`rawBody ready (${rawBody.length} bytes)`, undefined, 'body');
 
     if (!verifySlackSignature(req, rawBody)) {
-      console.error('[Slack] Invalid signature');
+      void log.error('Invalid signature', undefined, 'sig');
       res.status(401).send('Invalid signature');
       return;
     }
 
     params = parseBody(rawBody);
-    console.log(`[Slack] verified (+${Date.now() - t0}ms) command=${params.command} user=${params.user_id}`);
+    void log.info('verified', { command: params.command, user_id: params.user_id, text_len: (params.text || '').length }, 'sig');
   } catch (error) {
-    console.error('[Slack handler]', error);
+    void log.error('handler exception', error, 'entry');
     if (!res.headersSent) {
       res.status(500).send('Internal error');
     }
@@ -126,19 +128,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   // 1) 先に waitUntil を登録（res.end() より前！）
-  //    これをしないと Vercel Node は res.end() 後に関数を終了し、バックグラウンドが走らない。
   const capturedParams = params!;
   waitUntil(
     (async () => {
-      const b0 = Date.now();
       try {
-        console.log('[Slack] bg: dynamic import start');
+        await log.info('bg: dynamic import start', undefined, 'bg');
         const mod = await import('../src/slack-process-command.js');
-        console.log(`[Slack] bg: dynamic import done (+${Date.now() - b0}ms)`);
-        await mod.processSlackCommand(capturedParams);
-        console.log(`[Slack] bg: done (+${Date.now() - b0}ms)`);
+        await log.info('bg: dynamic import done', undefined, 'bg');
+        await mod.processSlackCommand(capturedParams, reqId);
+        await log.info('bg: done', undefined, 'bg');
       } catch (err) {
-        console.error('[Slack] bg error:', err);
+        await log.error('bg error', err, 'bg');
       }
     })()
   );
@@ -149,5 +149,5 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     'Content-Length': '0',
   });
   res.end();
-  console.log(`[Slack] 200 ACK sent (+${Date.now() - t0}ms)`);
+  void log.info(`ACK 200 sent (+${Date.now() - t0}ms)`, undefined, 'ack');
 }
