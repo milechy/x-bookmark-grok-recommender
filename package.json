@@ -1,0 +1,55 @@
+{
+  "name": "x-bookmark-grok-recommender",
+  "version": "1.0.0",
+  "description": "X (Twitter) Bookmark Grok Recommender Slack Bot - ブックマークをGrokでセマンティック検索して推薦",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint 'src/**/*.ts' --fix",
+    "format": "prettier --write 'src/**/*.ts' '*.{json,md}'",
+    "deploy": "vercel",
+    "vercel-build": "tsc"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.2.1",
+    "@slack/web-api": "^7.8.0",
+    "@vercel/kv": "^3.0.0",
+    "better-sqlite3": "^12.9.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.85.1",
+    "twitter-api-v2": "^1.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.5",
+    "@typescript-eslint/eslint-plugin": "^8.28.0",
+    "@typescript-eslint/parser": "^8.28.0",
+    "eslint": "^9.23.0",
+    "eslint-config-prettier": "^10.1.1",
+    "prettier": "^3.5.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.59.0",
+    "vercel": "^41.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "slack",
+    "bolt",
+    "twitter",
+    "x",
+    "grok",
+    "xai",
+    "bookmark",
+    "recommender"
+  ],
+  "author": "X Bookmark Grok Recommender",
+  "license": "MIT"
+}
