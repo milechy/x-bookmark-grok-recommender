@@ -4,7 +4,8 @@
   "outputDirectory": ".",
   "functions": {
     "api/slack.ts": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "memory": 1024
     },
     "api/oauth/callback.ts": {
       "maxDuration": 15

@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
+import getRawBody from 'raw-body';
 import { waitUntil } from '@vercel/functions';
 
 // Verify Slack request signature
@@ -34,14 +35,67 @@ function parseBody(rawBody: string): Record<string, string> {
   return params;
 }
 
-async function readRawBody(req: VercelRequest): Promise<string> {
-  if (typeof req.body === 'string') return req.body;
-  if (Buffer.isBuffer(req.body)) return req.body.toString('utf8');
-  if (req.body && typeof req.body === 'object') {
-    // Vercel already parsed it - reconstruct urlencoded
+function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(onTimeout)), ms);
+    promise
+      .then(
+        (v) => {
+          clearTimeout(t);
+          resolve(v);
+        },
+        (e) => {
+          clearTimeout(t);
+          reject(e);
+        }
+      );
+  });
+}
+
+/**
+ * Slack 署名の base string は**リクエストの生の本文**必須。Vercel にプリパースされたオブジェクトから
+ * URLSearchParams で再現すると署名が一致せず 401 になる。かつ、ストリーム二重読みで遅延・ハングする
+ * ケースがあったため、本文の有無に応じて分岐し、生読取りは必ず短いタイムアウト付きにする。
+ */
+async function readSlackFormBody(req: VercelRequest): Promise<string> {
+  if (typeof (req as any).rawBody === 'string' && (req as any).rawBody.length) {
+    return (req as any).rawBody;
+  }
+  if (Buffer.isBuffer((req as any).rawBody) && (req as any).rawBody.length) {
+    return (req as any).rawBody.toString('utf8');
+  }
+
+  if (typeof req.body === 'string' && req.body.length > 0) {
+    return req.body;
+  }
+  if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+    return req.body.toString('utf8');
+  }
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body) && !Buffer.isBuffer(req.body)) {
+    // プラットフォームが既に form をパース済み。署名用の厳密なバイト列ではない点に注意
     return new URLSearchParams(req.body as any).toString();
   }
-  return '';
+
+  const len = req.headers['content-length'] ? parseInt(String(req.headers['content-length']), 10) : NaN;
+  const canReadStream = req.readable && !req.readableEnded;
+  if (!canReadStream) {
+    return '';
+  }
+
+  try {
+    const buf = await withTimeout(
+      getRawBody(req, {
+        length: Number.isFinite(len) && len > 0 ? len : undefined,
+        limit: 1_000_000,
+      }),
+      2_000,
+      'Request body read timed out (Slack 3s limit)',
+    );
+    return Buffer.isBuffer(buf) ? buf.toString('utf8') : String(buf);
+  } catch (e) {
+    console.error('[Slack] raw-body read failed:', e);
+    return '';
+  }
 }
 
 // Send delayed response via response_url
@@ -243,26 +297,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   }
 
   try {
-    const rawBody = await readRawBody(req);
+    const rawBody = await readSlackFormBody(req);
+
+    if (!rawBody) {
+      console.error('[Slack] Empty request body');
+      return res.status(400).send('Bad request');
+    }
 
     if (!verifySlackSignature(req, rawBody)) {
-      console.error('[Slack] Invalid signature');
+      console.error('[Slack] Invalid signature (check SLACK_SIGNING_SECRET and raw body handling)');
       return res.status(401).send('Invalid signature');
     }
 
     const params = parseBody(rawBody);
     console.log(`[Slack] command=${params.command} user=${params.user_id}`);
 
-    // Queue async processing to continue after response is sent
-    // waitUntil keeps the function alive until the promise resolves
+    // Queue background work before HTTP ack so Vercel request context is still valid
     waitUntil(
       processCommand(params).catch((err) => {
         console.error('[Slack] Background processing error:', err);
       })
     );
 
-    // Immediately ack (must be < 3s)
-    return res.status(200).send('');
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Length': '0',
+      });
+      res.end();
+    }
+    return;
   } catch (error: any) {
     console.error('[Slack handler] Error:', error);
     if (!res.headersSent) {
@@ -270,3 +334,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
   }
 }
+
+/**
+ * Next.js 互換のルート設定。Vercel が解釈できれば本文のプリパースが無効になり、
+ * Slack 署名検証に必要な raw body を `getRawBody` で読める。
+ * 解釈されない環境では無視されるだけ。
+ */
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
