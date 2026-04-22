@@ -161,6 +161,58 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
+    // Content-Type によって slash / interactivity / events を振り分け
+    const contentType = (req.headers['content-type'] || '').toString().toLowerCase();
+    const isJson = contentType.includes('application/json');
+
+    if (isJson) {
+      // --- Events API ---
+      let eventBody: any = null;
+      try {
+        eventBody = JSON.parse(rawBody);
+      } catch (e) {
+        void log.error('events JSON parse failed', e, 'events');
+        res.status(400).send('Bad JSON');
+        return;
+      }
+
+      // url_verification は同期で challenge を返す
+      if (eventBody?.type === 'url_verification' && typeof eventBody.challenge === 'string') {
+        void log.info('url_verification', undefined, 'events');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ challenge: eventBody.challenge }));
+        return;
+      }
+
+      if (eventBody?.type === 'event_callback') {
+        const event = eventBody.event;
+        void log.info('event_callback', { event_type: event?.type, user: event?.user }, 'events');
+
+        waitUntil(
+          (async () => {
+            try {
+              const mod = await import('../src/slack-process-command.js');
+              await mod.processSlackEvent(event, reqId);
+              await log.info('bg: event done', undefined, 'bg');
+            } catch (err) {
+              await log.error('bg event error', err, 'bg');
+            }
+          })()
+        );
+
+        res.writeHead(200, { 'Content-Length': '0' });
+        res.end();
+        void log.info(`ACK 200 (events) sent (+${Date.now() - t0}ms)`, undefined, 'ack');
+        return;
+      }
+
+      void log.warn('unknown json event type', { type: eventBody?.type }, 'events');
+      res.writeHead(200, { 'Content-Length': '0' });
+      res.end();
+      return;
+    }
+
+    // --- Slash command or Interactivity (form-urlencoded) ---
     params = parseBody(rawBody);
     void log.info(
       'verified',
@@ -181,7 +233,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  const capturedParams = params!;
+  if (!params) {
+    if (!res.headersSent) {
+      res.writeHead(200, { 'Content-Length': '0' });
+      res.end();
+    }
+    return;
+  }
+
+  const capturedParams = params;
   const isInteractivity = !!capturedParams.payload;
 
   // 1) 先に waitUntil を登録（res.end() より前！）
