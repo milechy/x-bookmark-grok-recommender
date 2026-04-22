@@ -72,7 +72,10 @@ export default async function handler(request: Request): Promise<Response> {
     return new Response('Server misconfiguration', { status: 500 });
   }
 
-  const bgUrl = `${origin}/api/slack-background`;
+  // 同一 Vercel デプロイに確実に飛ばす（x-forwarded-host ずれで内部 fetch が外れるのを防ぐ）
+  const bgUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}/api/slack-background`
+    : `${origin}/api/slack-background`;
 
   waitUntil(
     fetch(bgUrl, {
