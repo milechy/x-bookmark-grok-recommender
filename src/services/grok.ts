@@ -1,5 +1,17 @@
-import OpenAI from 'openai';
+import OpenAI, { APIError } from 'openai';
 import { Recommendation, XBookmark } from '../types.js';
+
+function formatGrokError(error: unknown): string {
+  if (error instanceof APIError) {
+    const body =
+      error.error && typeof error.error === 'object' && 'message' in (error.error as object)
+        ? String((error.error as { message?: string }).message)
+        : '';
+    return [error.status != null && `HTTP ${error.status}`, error.message || body].filter(Boolean).join(' ').trim();
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 /** Grok の bookmark_id（tweet id または本文冒頭）から XBookmark を解決 */
 function resolveBookmarkByIdOrText(idOrRef: string | undefined, bookmarks: XBookmark[]): XBookmark | undefined {
@@ -129,7 +141,12 @@ ${bookmarksText}
         }
       } catch (e) {
         console.error('[Grok] Failed to parse JSON:', content);
-        return this.fallbackRanking(query, limitedBookmarks);
+        if (process.env.GROK_ALLOW_KEYWORD_FALLBACK === '1') {
+          return this.fallbackRanking(query, limitedBookmarks);
+        }
+        throw new Error(
+          'Grokの返答をJSONとして解釈できませんでした。しばらく待って /bookmark を再実行するか、クエリを短くしてください。'
+        );
       }
 
       const recommendations: Recommendation[] = [];
@@ -167,7 +184,13 @@ ${bookmarksText}
 
     } catch (error) {
       console.error('[Grok] API Error:', error);
-      return this.fallbackRanking(query, limitedBookmarks);
+      if (process.env.GROK_ALLOW_KEYWORD_FALLBACK === '1') {
+        return this.fallbackRanking(query, limitedBookmarks);
+      }
+      const detail = formatGrokError(error);
+      throw new Error(
+        `Grok API から正常な応答がありませんでした。${detail}\n*確認:* クレジット残高・GROK_API_KEY・モデル名（GROK_MODEL）`
+      );
     }
   }
 
