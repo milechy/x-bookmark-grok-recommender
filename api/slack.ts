@@ -52,7 +52,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         SLACK_SIGNING_SECRET: !!process.env.SLACK_SIGNING_SECRET,
         GROK_API_KEY: !!process.env.GROK_API_KEY,
         X_CLIENT_ID: !!process.env.X_CLIENT_ID,
-        VERCEL_KV_REST_API_URL: !!process.env.VERCEL_KV_REST_API_URL,
+        KV_REST_API_URL: !!process.env.KV_REST_API_URL || !!process.env.VERCEL_KV_REST_API_URL,
       },
       initError,
     });

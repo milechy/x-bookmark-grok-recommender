@@ -1,7 +1,10 @@
 import { kv } from '@vercel/kv';
 import { UserTokens, BookmarkCache, XBookmark } from './types.js';
 
-const isVercel = process.env.VERCEL === '1' || !!process.env.VERCEL_KV_REST_API_URL;
+const isVercel =
+  process.env.VERCEL === '1' ||
+  !!process.env.VERCEL_KV_REST_API_URL ||
+  !!process.env.KV_REST_API_URL;
 
 // Simple in-memory fallback for local development (non-persistent across restarts)
 // For production, Vercel KV is always used
