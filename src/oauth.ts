@@ -104,8 +104,8 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
     });
 
     // Clean up
-    if (globalThis.pkceStore) {
-      (globalThis.pkceStore as Map<string, string>).delete(state);
+    if ((globalThis as any).pkceStore) {
+      ((globalThis as any).pkceStore as Map<string, string>).delete(state);
     }
 
     console.log(`[OAuth] Successfully authenticated Slack user ${slackUserId}`);

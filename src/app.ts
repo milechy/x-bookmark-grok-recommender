@@ -54,11 +54,11 @@ export async function startLocalServer() {
   const port = process.env.PORT || 3000;
 
   // Health check
-  expressApp.get('/health', (req, res) => {
+  expressApp.get('/health', (_req, res) => {
     res.json({ status: 'healthy', service: 'X Bookmark Grok Recommender' });
   });
 
-  expressApp.get('/', (req, res) => {
+  expressApp.get('/', (_req, res) => {
     res.send(`
       <h1>X Bookmark Grok Recommender Slack Bot</h1>
       <p>ボットは正常に起動しています。</p>

@@ -6,7 +6,7 @@ export class XService {
   private client: TwitterApi | null = null;
   private userId: string = '';
 
-  constructor(private accessToken: string) {
+  constructor(accessToken: string) {
     this.client = new TwitterApi(accessToken);
   }
 
@@ -118,7 +118,7 @@ export class XService {
     return bookmarks;
   }
 
-  async refreshTokenIfNeeded(refreshToken?: string): Promise<string | null> {
+  async refreshTokenIfNeeded(_refreshToken?: string): Promise<string | null> {
     // TODO: Implement refresh logic if using refresh tokens (X OAuth2 supports it)
     // For simplicity, assume long-lived tokens or re-auth
     return null;
