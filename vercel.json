@@ -1,5 +1,0 @@
-{
-  "installCommand": "npm install",
-  "buildCommand": "echo 'Skipping build - Vercel auto-compiles api/*.ts'",
-  "outputDirectory": "."
-}
