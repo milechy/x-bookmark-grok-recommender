@@ -89,6 +89,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
+  // Slack リトライは即 200（重複実行を避ける）
+  const retryNum = req.headers['x-slack-retry-num'];
+  const retryReason = req.headers['x-slack-retry-reason'];
+  if (retryNum) {
+    console.log(`[Slack] retry ignored: num=${retryNum} reason=${retryReason}`);
+    res.writeHead(200, { 'Content-Length': '0' });
+    res.end();
+    return;
+  }
+
   let params: Record<string, string> | undefined;
   try {
     const rawBody = await readRawBodyStream(req);
@@ -115,24 +125,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // 1) 先に 200 を返す（Slack 3 秒制約を厳守）
+  // 1) 先に waitUntil を登録（res.end() より前！）
+  //    これをしないと Vercel Node は res.end() 後に関数を終了し、バックグラウンドが走らない。
+  const capturedParams = params!;
+  waitUntil(
+    (async () => {
+      const b0 = Date.now();
+      try {
+        console.log('[Slack] bg: dynamic import start');
+        const mod = await import('../src/slack-process-command.js');
+        console.log(`[Slack] bg: dynamic import done (+${Date.now() - b0}ms)`);
+        await mod.processSlackCommand(capturedParams);
+        console.log(`[Slack] bg: done (+${Date.now() - b0}ms)`);
+      } catch (err) {
+        console.error('[Slack] bg error:', err);
+      }
+    })()
+  );
+
+  // 2) ACK 200 を返す
   res.writeHead(200, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Length': '0',
   });
   res.end();
   console.log(`[Slack] 200 ACK sent (+${Date.now() - t0}ms)`);
-
-  // 2) 重処理は waitUntil に入れて同プロセス継続（動的 import で読み込む）
-  const capturedParams = params!;
-  waitUntil(
-    (async () => {
-      try {
-        const { processSlackCommand } = await import('../src/slack-process-command.js');
-        await processSlackCommand(capturedParams);
-      } catch (err) {
-        console.error('[Slack] background error:', err);
-      }
-    })()
-  );
 }
