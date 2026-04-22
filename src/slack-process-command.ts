@@ -11,6 +11,42 @@ function shrinkMrkdwn(s: string, max: number = MAX_SECTION_TEXT): string {
   return s.slice(0, max - 1) + '…';
 }
 
+/* -------------------------------------------------------------------------- */
+/* 既表示ブックマークの除外（KV SET、user ごと、TTL 7日）                        */
+/* -------------------------------------------------------------------------- */
+const SEEN_TTL_SEC = 60 * 60 * 24 * 7; // 7 days
+function seenKey(user_id: string): string {
+  return `seen:${user_id}`;
+}
+async function getSeenIds(user_id: string): Promise<Set<string>> {
+  try {
+    const { kv } = await import('@vercel/kv');
+    const ids = (await kv.smembers(seenKey(user_id))) as string[] | null;
+    return new Set(Array.isArray(ids) ? ids : []);
+  } catch (e) {
+    console.warn('[seen] get failed', e);
+    return new Set<string>();
+  }
+}
+async function addSeenIds(user_id: string, ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  try {
+    const { kv } = await import('@vercel/kv');
+    await kv.sadd(seenKey(user_id), ids[0], ...ids.slice(1));
+    await kv.expire(seenKey(user_id), SEEN_TTL_SEC);
+  } catch (e) {
+    console.warn('[seen] add failed', e);
+  }
+}
+async function clearSeenIds(user_id: string): Promise<void> {
+  try {
+    const { kv } = await import('@vercel/kv');
+    await kv.del(seenKey(user_id));
+  } catch (e) {
+    console.warn('[seen] clear failed', e);
+  }
+}
+
 function fmtDateJst(iso: string | number | undefined): string {
   if (!iso) return '-';
   try {
@@ -152,7 +188,12 @@ function makeDMResponder(user_id: string): Responder {
   return {
     async progress(text) {
       try {
-        await client.chat.postMessage({ channel: user_id, text: shrinkMrkdwn(text, 10_000) });
+        await client.chat.postMessage({
+          channel: user_id,
+          text: shrinkMrkdwn(text, 10_000),
+          unfurl_links: false,
+          unfurl_media: false,
+        });
       } catch (e) {
         console.error('[DM] progress', e);
       }
@@ -162,6 +203,8 @@ function makeDMResponder(user_id: string): Responder {
         channel: user_id,
         text: payload.text ?? 'Xブックマーク推薦',
         ...(payload.blocks ? { blocks: payload.blocks as any } : {}),
+        unfurl_links: false,
+        unfurl_media: false,
       });
     },
     async error(text, blocks) {
@@ -169,6 +212,8 @@ function makeDMResponder(user_id: string): Responder {
         channel: user_id,
         text: shrinkMrkdwn(text),
         ...(blocks ? { blocks: blocks as any } : {}),
+        unfurl_links: false,
+        unfurl_media: false,
       });
     },
   };
@@ -196,6 +241,18 @@ async function openBookmarkModal(
       text: '遅くなるが最新のブックマークを反映',
     },
     value: 'force_sync',
+  };
+
+  const resetSeenOption = {
+    text: {
+      type: 'plain_text' as const,
+      text: '表示履歴をリセット（過去7日に出たものも再び候補に）',
+    },
+    description: {
+      type: 'plain_text' as const,
+      text: '通常は 1 度推薦したものは次回から除外されます',
+    },
+    value: 'reset_seen',
   };
 
   await client.views.open({
@@ -239,7 +296,7 @@ async function openBookmarkModal(
           element: {
             type: 'checkboxes',
             action_id: 'options_input',
-            options: [forceSyncOption],
+            options: [forceSyncOption, resetSeenOption],
             ...(opts.defaultForceSync ? { initial_options: [forceSyncOption] } : {}),
           },
         },
@@ -306,7 +363,7 @@ async function runBookmarkFlow(
   user_id: string,
   responder: Responder,
   log: DebugLogger,
-  options: { forceSync?: boolean } = {}
+  options: { forceSync?: boolean; resetSeen?: boolean } = {}
 ): Promise<void> {
   const { storage } = await import('./storage.js');
   const { createAuthUrl } = await import('./oauth.js');
@@ -389,10 +446,41 @@ async function runBookmarkFlow(
     return;
   }
 
-  const toGrok = Math.min(50, bookmarks.length);
+  // 既表示ブックマークを除外（reset 指定時は除外しない＆KV もクリア）
+  let autoResetFallback = false;
+  if (options.resetSeen) {
+    await clearSeenIds(user_id);
+    await log.info('seen cleared (user requested)', undefined, 'seen');
+  }
+  const seen = options.resetSeen ? new Set<string>() : await getSeenIds(user_id);
+  let candidates = seen.size > 0 ? bookmarks.filter((b) => !seen.has(b.id)) : bookmarks;
+  if (candidates.length === 0) {
+    await log.warn('all bookmarks already shown; auto-reset seen', { seenSize: seen.size }, 'seen');
+    await clearSeenIds(user_id);
+    candidates = bookmarks;
+    autoResetFallback = true;
+  }
+  await log.info(
+    'seen filter applied',
+    {
+      total: bookmarks.length,
+      seen: seen.size,
+      excluded: bookmarks.length - candidates.length,
+      candidates: candidates.length,
+      autoResetFallback,
+    },
+    'seen'
+  );
+
+  const toGrok = Math.min(50, candidates.length);
   await responder.progress(
     `🤖 *ステップ2/3* *Grok（xAI）* に依頼送信中\n` +
       `• *X:* ブックマーク *${bookmarks.length}* 件を取得${options.forceSync ? '（再同期）' : ''}\n` +
+      (seen.size > 0 && !options.resetSeen && !autoResetFallback
+        ? `• *既表示除外:* ${bookmarks.length - candidates.length} 件除外 → *${candidates.length}* 件が候補\n`
+        : '') +
+      (autoResetFallback ? `• *履歴自動リセット:* 既表示で候補が尽きたため全件対象に戻しました\n` : '') +
+      (options.resetSeen ? `• *履歴リセット:* 手動で表示履歴をクリア\n` : '') +
       `• *Grok 入力:* クエリ ＋ 要約 *${toGrok}* 件（新しい順・最大50）\n` +
       `• *モデル:* \`${grokModel}\`\n` +
       `• *今:* Grok API で *推論* 中。60秒経つと再通知します ⬇`
@@ -413,10 +501,10 @@ async function runBookmarkFlow(
   try {
     await log.info(
       'Grok rankBookmarks start',
-      { model: grokModel, input_count: bookmarks.length, query_len: query.length },
+      { model: grokModel, input_count: candidates.length, query_len: query.length },
       'grok'
     );
-    recommendations = await withTimeout(grok.rankBookmarks(query, bookmarks), 150_000, 'Grok 分析');
+    recommendations = await withTimeout(grok.rankBookmarks(query, candidates), 150_000, 'Grok 分析');
     await log.info('Grok rankBookmarks done', { recs: recommendations.length }, 'grok');
   } catch (e) {
     await log.error('Grok rankBookmarks failed', e, 'grok');
@@ -436,7 +524,9 @@ async function runBookmarkFlow(
         type: 'mrkdwn',
         text: shrinkMrkdwn(
           `*Grok*（\`${grokModel}\`）*クエリ長:* ${query.length}文字\n` +
-            `*入力ブックマーク* ${bookmarks.length}件 → *表示* 上位${recommendations.length}件`
+            `*候補* ${candidates.length}件（全${bookmarks.length}件中・既表示 ${bookmarks.length - candidates.length} 件を除外）→ *表示* 上位${recommendations.length}件` +
+            (autoResetFallback ? '\n_※ 既表示で候補が尽きたため履歴を自動リセットしました_' : '') +
+            (options.resetSeen ? '\n_※ 履歴リセット指定のため既表示も候補に含めました_' : '')
         ),
       },
     },
@@ -526,6 +616,11 @@ async function runBookmarkFlow(
       ),
     });
   }
+
+  // 今回出したものを次回から除外するため seen へ追加
+  const newIds = recommendations.map((r) => r.bookmark.id).filter(Boolean);
+  await addSeenIds(user_id, newIds);
+  await log.info('seen updated', { added: newIds.length }, 'seen');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -658,9 +753,12 @@ async function publishHomeView(user_id: string, log: DebugLogger): Promise<void>
 
   let tokens: UserTokens | null = null;
   let cache: BookmarkCache | null = null;
+  let seenCount = 0;
   try {
     tokens = await storage.getUserTokens(user_id);
     cache = await storage.getBookmarkCache(user_id);
+    const seen = await getSeenIds(user_id);
+    seenCount = seen.size;
   } catch (e) {
     await log.warn('home data fetch failed', e, 'home');
   }
@@ -680,7 +778,9 @@ async function publishHomeView(user_id: string, log: DebugLogger): Promise<void>
     : '⚠️ *X アカウント未連携*\n下のボタンからログインしてください。';
 
   const cacheText = cache
-    ? `📚 ブックマーク *${cache.bookmarks.length}* 件キャッシュ済み\n最終同期: ${fmtDateJst(cache.lastSynced)}`
+    ? `📚 ブックマーク *${cache.bookmarks.length}* 件キャッシュ済み\n` +
+      `最終同期: ${fmtDateJst(cache.lastSynced)}\n` +
+      `🕑 過去7日の表示履歴: *${seenCount}* 件（次回の推薦から除外されます）`
     : '📚 キャッシュなし（`/bookmark-sync` または `/bookmark` で初回取得）';
 
   const blocks: unknown[] = [
@@ -733,8 +833,9 @@ async function publishHomeView(user_id: string, log: DebugLogger): Promise<void>
           '*📘 使い方*\n' +
           '• `/bookmark <短文>` — その場で Grok 推薦（チャンネル内 ephemeral）\n' +
           '• `/bookmark` — モーダルで長文貼り付け → 結果は *DM* に\n' +
-          '• `/bookmark-sync` — ブックマークキャッシュを強制再取得\n' +
-          '• 推薦結果下部の *「🔁 もっとこういう視点で絞り込む」* で追加の観点を足して再検索可',
+          '• `/bookmark-sync` — ブックマークキャッシュを強制再取得（表示履歴もリセット）\n' +
+          '• 推薦結果下部の *「🔁 もっとこういう視点で絞り込む」* で追加の観点を足して再検索\n' +
+          '• 同じブックマークは *過去7日* 繰り返さない（モーダルで履歴リセット可）',
       },
     },
     {
@@ -820,8 +921,11 @@ export async function processSlackCommand(
       const xService = new XService(tokens.xAccessToken, user_id);
       await xService.initialize();
       const bookmarks = await xService.getAllBookmarks(true, user_id);
+      // 強制再同期なので表示履歴もリセット（新しいブックマークが増えた可能性）
+      await clearSeenIds(user_id);
+      await log.info('seen cleared on /bookmark-sync', undefined, 'seen');
       await responder.final({
-        text: `✅ 同期完了！ *${bookmarks.length}件* のブックマークをキャッシュしました。`,
+        text: `✅ 同期完了！ *${bookmarks.length}件* のブックマークをキャッシュしました。表示履歴もリセット済み。`,
       });
       return;
     }
@@ -910,10 +1014,11 @@ export async function processSlackInteractivity(payloadStr: string, reqId?: stri
     const selected =
       payload.view?.state?.values?.options_block?.options_input?.selected_options ?? [];
     const forceSync = Array.isArray(selected) && selected.some((o: any) => o?.value === 'force_sync');
+    const resetSeen = Array.isArray(selected) && selected.some((o: any) => o?.value === 'reset_seen');
 
     await log.info(
       'bookmark_modal submitted',
-      { user_id, text_len: query.length, forceSync },
+      { user_id, text_len: query.length, forceSync, resetSeen },
       'modal'
     );
 
@@ -924,10 +1029,12 @@ export async function processSlackInteractivity(payloadStr: string, reqId?: stri
     }
     try {
       await responder.progress(
-        `📥 受け付けました（${query.length}文字${forceSync ? ' / 再取得' : ''}）\n` +
-          `結果はこのDMに届きます。しばらくお待ちください…`
+        `📥 受け付けました（${query.length}文字` +
+          (forceSync ? ' / 再取得' : '') +
+          (resetSeen ? ' / 履歴リセット' : '') +
+          `）\n結果はこのDMに届きます。しばらくお待ちください…`
       );
-      await runBookmarkFlow(query, user_id, responder, log, { forceSync });
+      await runBookmarkFlow(query, user_id, responder, log, { forceSync, resetSeen });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       await log.error('bookmark_modal flow failed', error, 'modal');
