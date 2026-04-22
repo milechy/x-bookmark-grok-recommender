@@ -123,10 +123,16 @@ export async function processSlackCommand(params: Record<string, string>): Promi
 
     if (command === '/bookmark') {
       const query = (text || '').trim() || 'おすすめのブックマーク';
+      const grokModel = process.env.GROK_MODEL || 'grok-4.20-reasoning';
 
       await sendDelayedResponse(response_url, {
         response_type: 'ephemeral',
-        text: `🔍 「${query}」で分析中... Grokがブックマークからおすすめを選定しています⏳`,
+        replace_original: true,
+        text: shrinkMrkdwn(
+          `🔍 *ステップ1/3* 準備中\n` +
+            `クエリ: \`${shrinkMrkdwn(query, 300)}\`\n` +
+            `いま X からブックマークを読み込みます。続きはこのメッセージが更新されます⏳`
+        ),
       });
 
       const { XService } = await import('./services/x.js');
@@ -154,30 +160,58 @@ export async function processSlackCommand(params: Record<string, string>): Promi
         return;
       }
 
+      const toGrok = Math.min(50, bookmarks.length);
       await sendDelayedResponse(response_url, {
         response_type: 'ephemeral',
         replace_original: true,
-        text: `⏱ ${bookmarks.length}件のブックマークを読みました。Grok 分析中…（目安1〜2分。長いとタイムアウトの場合はクエリを短くしてください）`,
+        text: shrinkMrkdwn(
+          `🤖 *ステップ2/3* *Grok（xAI）* に依頼送信中\n` +
+            `• *X:* ブックマーク *${bookmarks.length}* 件を取得済み\n` +
+            `• *Grok へ送る内容:* あなたのクエリ ＋ 各ツイート要約 *${toGrok}* 件（新しい順・最大50件）\n` +
+            `• *モデル:* \`${grokModel}\`\n` +
+            `• *いま起きていること:* Grok API が上記を読み、関連度でランキングする *推論* を実行中です（通信はサーバー側）。\n` +
+            `• *目安:* 数十秒～2分。60秒超えたら下に追加表示します⬇`
+        ),
       });
 
       const grok = new GrokService();
-      const recommendations = await withTimeout(
-        grok.rankBookmarks(query, bookmarks),
-        150_000,
-        'Grok 分析',
-      );
+
+      let longWaitTimer: ReturnType<typeof setTimeout> | undefined;
+      longWaitTimer = setTimeout(() => {
+        void sendDelayedResponse(response_url, {
+          response_type: 'ephemeral',
+          replace_original: true,
+          text: shrinkMrkdwn(
+            `⏳ *Grok 応答待ち*（*60秒* 経過）\n` +
+              `まだ *${grokModel}* からの JSON 応答が返っていません。推論に時間がかかっている可能性があります。最大約2分30秒でタイムアウトします。`
+          ),
+        }).catch((e) => console.error('[Slack] 60s progress', e));
+      }, 60_000);
+
+      let recommendations: Recommendation[];
+      try {
+        recommendations = await withTimeout(
+          grok.rankBookmarks(query, bookmarks),
+          150_000,
+          'Grok 分析',
+        );
+      } finally {
+        if (longWaitTimer !== undefined) {
+          clearTimeout(longWaitTimer);
+        }
+      }
 
       const blocks: unknown[] = [
         {
           type: 'header',
-          text: { type: 'plain_text', text: '📚 Xブックマーク Grok推薦', emoji: true },
+          text: { type: 'plain_text', text: '📚 ステップ3/3 完了：Grok推薦', emoji: true },
         },
         {
           type: 'section',
           text: {
             type: 'mrkdwn',
             text: shrinkMrkdwn(
-              `*クエリ:* \`${shrinkMrkdwn(query, 500)}\`　*分析:* ${bookmarks.length}件 → 上位${recommendations.length}件`
+              `*Grok*（\`${grokModel}\`）*クエリ:* \`${shrinkMrkdwn(query, 500)}\`\n*入力ブックマーク* ${bookmarks.length}件 → *表示* 上位${recommendations.length}件`
             ),
           },
         },
