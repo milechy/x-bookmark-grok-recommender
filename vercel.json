@@ -3,7 +3,7 @@
   "buildCommand": "echo 'Skipping build - Vercel auto-compiles api/*.ts'",
   "outputDirectory": ".",
   "functions": {
-    "api/slack.ts": {
+    "api/slack-background.ts": {
       "maxDuration": 60,
       "memory": 1024
     },
