@@ -1,0 +1,13 @@
+{
+  "installCommand": "npm install",
+  "buildCommand": "echo 'Skipping build - Vercel auto-compiles api/*.ts'",
+  "outputDirectory": ".",
+  "functions": {
+    "api/slack.ts": {
+      "maxDuration": 60
+    },
+    "api/oauth/callback.ts": {
+      "maxDuration": 15
+    }
+  }
+}
