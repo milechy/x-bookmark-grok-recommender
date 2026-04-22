@@ -17,7 +17,6 @@
     "@slack/bolt": "^4.2.1",
     "@slack/web-api": "^7.8.0",
     "@vercel/kv": "^3.0.0",
-    "better-sqlite3": "^12.9.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "openai": "^4.85.1",
@@ -25,7 +24,6 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.1",
     "@types/node": "^22.13.5",
     "@typescript-eslint/eslint-plugin": "^8.28.0",
