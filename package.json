@@ -12,6 +12,10 @@
     "deploy": "vercel",
     "vercel-build": "tsc"
   },
+  "vercel": {
+    "buildCommand": "npm run build",
+    "outputDirectory": "dist"
+  },
   "dependencies": {
     "@slack/bolt": "^4.2.1",
     "@slack/web-api": "^7.8.0",
