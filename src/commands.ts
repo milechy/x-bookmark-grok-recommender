@@ -1,4 +1,5 @@
-import { App, Block, KnownBlock } from '@slack/bolt';
+import { App } from '@slack/bolt';
+import type { Block, KnownBlock } from '@slack/types';
 import { XService } from './services/x.js';
 import GrokService from './services/grok.js';
 import { sendXLoginDM } from './oauth.js';

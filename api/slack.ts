@@ -1,24 +1,15 @@
-import { App, HTTPReceiver } from '@slack/bolt';
+import { App } from '@slack/bolt';
 import { registerCommands } from '../src/commands.js';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 let appPromise: Promise<App> | null = null;
 
-function getApp(): Promise<App> {
+async function getOrCreateApp(): Promise<App> {
   if (!appPromise) {
     appPromise = (async () => {
-      const receiver = new HTTPReceiver({
-        signingSecret: process.env.SLACK_SIGNING_SECRET!,
-        endpoints: {
-          events: '/api/slack',
-          commands: '/api/slack',
-          actions: '/api/slack',
-        },
-      });
-
       const app = new App({
         token: process.env.SLACK_BOT_TOKEN!,
-        receiver,
+        signingSecret: process.env.SLACK_SIGNING_SECRET!,
         socketMode: false,
       });
 
@@ -37,9 +28,17 @@ function getApp(): Promise<App> {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const app = await getApp();
-    const receiver = app.receiver as HTTPReceiver;
-    await receiver.requestHandler(req as any, res as any);
+    const app = await getOrCreateApp();
+    
+    // Use the built-in request handler from Bolt for Vercel
+    // This bypasses direct receiver access which has private properties in v4
+    if (req.url?.includes('/slack')) {
+      // For events, commands, actions
+      const body = req.body || req;
+      await app.processEvent(body as any);
+    } else {
+      res.status(404).json({ error: 'Not found' });
+    }
   } catch (error: any) {
     console.error('Vercel handler error:', error);
     if (!res.headersSent) {

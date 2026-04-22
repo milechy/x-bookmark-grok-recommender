@@ -2,11 +2,15 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { WebClient } from '@slack/web-api';
 import { handleOAuthCallback } from '../../src/oauth.js';
 
-const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN);
+const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN!);
 
-export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+export default async function handler(
+  req: VercelRequest, 
+  res: VercelResponse
+): Promise<void> {
   if (req.method !== 'GET') {
-    return res.status(405).send('Method not allowed');
+    res.status(405).send('Method not allowed');
+    return;
   }
 
   const { code, state, error } = req.query as { 
@@ -17,11 +21,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   if (error) {
     console.error('OAuth error from X:', error);
-    return res.redirect('/?error=' + encodeURIComponent(error as string));
+    res.redirect('/?error=' + encodeURIComponent(error as string));
+    return;
   }
 
   if (!code || !state) {
-    return res.status(400).send('Missing code or state parameter');
+    res.status(400).send('Missing code or state parameter');
+    return;
   }
 
   try {

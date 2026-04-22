@@ -1,4 +1,4 @@
-import { App, ExpressReceiver, HTTPReceiver } from '@slack/bolt';
+import { App, ExpressReceiver } from '@slack/bolt';
 import { registerCommands } from './commands.js';
 import dotenv from 'dotenv';
 
