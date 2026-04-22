@@ -1,13 +1,14 @@
 /**
  * Slack エントリ（Node）。
- * - 即 ACK（ここで 200 を返す）
- * - 重い処理は waitUntil で同プロセス継続（関数ハンドルを跨がないので
- *   Vercel Deployment Protection 等に影響を受けない）
+ * 原則：
+ *  - 署名検証と ACK(200) *だけ* を即返す
+ *  - 重い依存（@slack/web-api, twitter-api-v2, openai, @vercel/kv 等）は
+ *    **一切 top-level で import しない**（コールドスタートで3秒を超えないため）
+ *  - 重処理は waitUntil 内で **動的 import** だけ使う
  */
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
 import { waitUntil } from '@vercel/functions';
-import { processSlackCommand } from '../src/slack-process-command.js';
 
 export const config = {
   api: {
@@ -27,7 +28,8 @@ function verifySlackSignature(req: VercelRequest, rawBody: string): boolean {
   if (parseInt(timestamp, 10) < fiveMinAgo) return false;
 
   const baseString = `v0:${timestamp}:${rawBody}`;
-  const mySignature = 'v0=' + crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
+  const mySignature =
+    'v0=' + crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
   try {
     return crypto.timingSafeEqual(Buffer.from(mySignature, 'utf8'), Buffer.from(signature, 'utf8'));
   } catch {
@@ -53,7 +55,6 @@ async function readRawBodyStream(req: VercelRequest): Promise<string> {
     !Buffer.isBuffer(req.body) &&
     Object.keys(req.body as object).length > 0
   ) {
-    // 既にパース済み → 元のバイト列は失われている。署名検証は失敗する可能性があるが最終防御として復元
     return new URLSearchParams(req.body as Record<string, string>).toString();
   }
 
@@ -65,6 +66,7 @@ async function readRawBodyStream(req: VercelRequest): Promise<string> {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  const t0 = Date.now();
   console.log(`[Slack] ${req.method} ${req.url}`);
 
   if (req.method === 'GET') {
@@ -87,6 +89,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
+  let params: Record<string, string> | undefined;
   try {
     const rawBody = await readRawBodyStream(req);
     if (!rawBody) {
@@ -94,6 +97,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       res.status(400).send('Bad request');
       return;
     }
+    console.log(`[Slack] rawBody ready (${rawBody.length} bytes, +${Date.now() - t0}ms)`);
 
     if (!verifySlackSignature(req, rawBody)) {
       console.error('[Slack] Invalid signature');
@@ -101,25 +105,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
-    const params = parseBody(rawBody);
-    console.log(`[Slack] command=${params.command} user=${params.user_id}`);
-
-    // 重い処理を同プロセスの waitUntil で実行（HTTP 200 は先に返す）
-    waitUntil(
-      processSlackCommand(params).catch((err) =>
-        console.error('[Slack] background error:', err)
-      )
-    );
-
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Length': '0',
-    });
-    res.end();
+    params = parseBody(rawBody);
+    console.log(`[Slack] verified (+${Date.now() - t0}ms) command=${params.command} user=${params.user_id}`);
   } catch (error) {
     console.error('[Slack handler]', error);
     if (!res.headersSent) {
       res.status(500).send('Internal error');
     }
+    return;
   }
+
+  // 1) 先に 200 を返す（Slack 3 秒制約を厳守）
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Length': '0',
+  });
+  res.end();
+  console.log(`[Slack] 200 ACK sent (+${Date.now() - t0}ms)`);
+
+  // 2) 重処理は waitUntil に入れて同プロセス継続（動的 import で読み込む）
+  const capturedParams = params!;
+  waitUntil(
+    (async () => {
+      try {
+        const { processSlackCommand } = await import('../src/slack-process-command.js');
+        await processSlackCommand(capturedParams);
+      } catch (err) {
+        console.error('[Slack] background error:', err);
+      }
+    })()
+  );
 }
