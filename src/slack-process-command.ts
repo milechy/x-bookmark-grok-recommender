@@ -2,6 +2,7 @@
  * Slash コマンドの実処理（X / Grok）。Node ランタイム向け。
  * Edge の手前で即 ACK するため、api/slack-background から呼び出す。
  */
+import { WebClient } from '@slack/web-api';
 import type { Recommendation } from './types.js';
 
 // Slack: mrkdwn はおおよそ 1 万文字制限。section text は安全のため切り詰め
@@ -46,6 +47,36 @@ export async function sendDelayedResponse(
     }
   }
   return r;
+}
+
+type SlashParams = { channel_id?: string; user_id: string; response_url: string };
+
+/**
+ * 進捗は chat.postEphemeral。slash の response_url は最大5回なので、結果表示用の枠を残す。
+ */
+async function postProgressEphemeral(slash: SlashParams, text: string): Promise<void> {
+  const token = process.env.SLACK_BOT_TOKEN;
+  if (token && slash.channel_id) {
+    try {
+      const client = new WebClient(token);
+      const r = await client.chat.postEphemeral({
+        channel: slash.channel_id,
+        user: slash.user_id,
+        text: shrinkMrkdwn(text, 10_000),
+      });
+      if (r.ok) {
+        return;
+      }
+      console.error('[Slack] postEphemeral not ok', r.error);
+    } catch (e) {
+      console.error('[Slack] postEphemeral', e);
+    }
+  }
+  await sendDelayedResponse(
+    slash.response_url,
+    { response_type: 'ephemeral', text: shrinkMrkdwn(text) },
+    { label: 'progress-fallback' }
+  );
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
@@ -124,16 +155,18 @@ export async function processSlackCommand(params: Record<string, string>): Promi
     if (command === '/bookmark') {
       const query = (text || '').trim() || 'おすすめのブックマーク';
       const grokModel = process.env.GROK_MODEL || 'grok-4.20-reasoning';
+      const slash: SlashParams = {
+        channel_id: params.channel_id,
+        user_id,
+        response_url,
+      };
 
-      await sendDelayedResponse(response_url, {
-        response_type: 'ephemeral',
-        replace_original: true,
-        text: shrinkMrkdwn(
-          `🔍 *ステップ1/3* 準備中\n` +
-            `クエリ: \`${shrinkMrkdwn(query, 300)}\`\n` +
-            `いま X からブックマークを読み込みます。続きはこのメッセージが更新されます⏳`
-        ),
-      });
+      await postProgressEphemeral(
+        slash,
+        `🔍 *ステップ1/3* 準備中\n` +
+          `クエリ: \`${shrinkMrkdwn(query, 300)}\`\n` +
+          `X からブックマークを読み込み中です（進捗はこの下に追記されます）⏳`
+      );
 
       const { XService } = await import('./services/x.js');
       const { GrokService } = await import('./services/grok.js');
@@ -161,31 +194,24 @@ export async function processSlackCommand(params: Record<string, string>): Promi
       }
 
       const toGrok = Math.min(50, bookmarks.length);
-      await sendDelayedResponse(response_url, {
-        response_type: 'ephemeral',
-        replace_original: true,
-        text: shrinkMrkdwn(
-          `🤖 *ステップ2/3* *Grok（xAI）* に依頼送信中\n` +
-            `• *X:* ブックマーク *${bookmarks.length}* 件を取得済み\n` +
-            `• *Grok へ送る内容:* あなたのクエリ ＋ 各ツイート要約 *${toGrok}* 件（新しい順・最大50件）\n` +
-            `• *モデル:* \`${grokModel}\`\n` +
-            `• *いま起きていること:* Grok API が上記を読み、関連度でランキングする *推論* を実行中です（通信はサーバー側）。\n` +
-            `• *目安:* 数十秒～2分。60秒超えたら下に追加表示します⬇`
-        ),
-      });
+      await postProgressEphemeral(
+        slash,
+        `🤖 *ステップ2/3* *Grok（xAI）* に依頼送信中\n` +
+          `• *X:* ブックマーク *${bookmarks.length}* 件を取得済み\n` +
+          `• *Grok 入力:* クエリ ＋ 要約 *${toGrok}* 件（新しい順・最大50）\n` +
+          `• *モデル:* \`${grokModel}\`\n` +
+          `• *今:* Grok API で *推論* 中。60秒経つと下にもう1行出ます⬇`
+      );
 
       const grok = new GrokService();
 
       let longWaitTimer: ReturnType<typeof setTimeout> | undefined;
       longWaitTimer = setTimeout(() => {
-        void sendDelayedResponse(response_url, {
-          response_type: 'ephemeral',
-          replace_original: true,
-          text: shrinkMrkdwn(
-            `⏳ *Grok 応答待ち*（*60秒* 経過）\n` +
-              `まだ *${grokModel}* からの JSON 応答が返っていません。推論に時間がかかっている可能性があります。最大約2分30秒でタイムアウトします。`
-          ),
-        }).catch((e) => console.error('[Slack] 60s progress', e));
+        void postProgressEphemeral(
+          slash,
+          `⏳ *Grok 応答待ち*（60秒経過）\n` +
+            `*${grokModel}* の JSON 待ち。推論に時間がかかる場合があります。最大約2分30秒でタイムアウト。`
+        ).catch((e) => console.error('[Slack] 60s progress', e));
       }, 60_000);
 
       let recommendations: Recommendation[];
