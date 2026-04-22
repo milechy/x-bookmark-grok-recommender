@@ -17,24 +17,44 @@ export const config = {
   },
 };
 
-function verifySlackSignature(req: VercelRequest, rawBody: string): boolean {
+type SigCheckResult =
+  | { ok: true }
+  | { ok: false; reason: string; detail?: Record<string, unknown> };
+
+function verifySlackSignature(req: VercelRequest, rawBody: string): SigCheckResult {
   const signingSecret = process.env.SLACK_SIGNING_SECRET;
-  if (!signingSecret) return false;
+  if (!signingSecret) return { ok: false, reason: 'SLACK_SIGNING_SECRET unset' };
 
   const timestamp = req.headers['x-slack-request-timestamp'] as string | undefined;
   const signature = req.headers['x-slack-signature'] as string | undefined;
-  if (!timestamp || !signature) return false;
+  if (!timestamp) return { ok: false, reason: 'missing x-slack-request-timestamp' };
+  if (!signature) return { ok: false, reason: 'missing x-slack-signature' };
 
-  const fiveMinAgo = Math.floor(Date.now() / 1000) - 60 * 5;
-  if (parseInt(timestamp, 10) < fiveMinAgo) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (parseInt(timestamp, 10) < now - 60 * 5) {
+    return { ok: false, reason: 'timestamp too old', detail: { timestamp, now } };
+  }
 
   const baseString = `v0:${timestamp}:${rawBody}`;
   const mySignature =
     'v0=' + crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
   try {
-    return crypto.timingSafeEqual(Buffer.from(mySignature, 'utf8'), Buffer.from(signature, 'utf8'));
-  } catch {
-    return false;
+    const equal = crypto.timingSafeEqual(
+      Buffer.from(mySignature, 'utf8'),
+      Buffer.from(signature, 'utf8')
+    );
+    if (equal) return { ok: true };
+    return {
+      ok: false,
+      reason: 'signature mismatch',
+      detail: {
+        rawBodyLen: rawBody.length,
+        mySignaturePrefix: mySignature.slice(0, 20),
+        theirSignaturePrefix: signature.slice(0, 20),
+      },
+    };
+  } catch (e) {
+    return { ok: false, reason: 'compare error', detail: { err: String(e) } };
   }
 }
 
@@ -46,9 +66,33 @@ function parseBody(rawBody: string): Record<string, string> {
   return params;
 }
 
-async function readRawBodyStream(req: VercelRequest): Promise<string> {
-  if (typeof req.body === 'string' && req.body.length > 0) return req.body;
-  if (Buffer.isBuffer(req.body) && req.body.length > 0) return req.body.toString('utf8');
+/**
+ * Slack 署名検証には *バイト列同一* の raw body が必要。
+ * bodyParser: false の下で、まずストリームを最優先で読む。
+ * 0 バイトしか得られなかった時のみ、pre-parsed body の再構築にフォールバック。
+ */
+async function readRawBody(
+  req: VercelRequest
+): Promise<{ raw: string; source: 'stream' | 'string' | 'buffer' | 'reconstructed' | 'empty' }> {
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    }
+    if (chunks.length > 0) {
+      const buf = Buffer.concat(chunks);
+      if (buf.length > 0) return { raw: buf.toString('utf8'), source: 'stream' };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  if (typeof req.body === 'string' && req.body.length > 0) {
+    return { raw: req.body, source: 'string' };
+  }
+  if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+    return { raw: req.body.toString('utf8'), source: 'buffer' };
+  }
   if (
     req.body &&
     typeof req.body === 'object' &&
@@ -56,14 +100,12 @@ async function readRawBodyStream(req: VercelRequest): Promise<string> {
     !Buffer.isBuffer(req.body) &&
     Object.keys(req.body as object).length > 0
   ) {
-    return new URLSearchParams(req.body as Record<string, string>).toString();
+    return {
+      raw: new URLSearchParams(req.body as Record<string, string>).toString(),
+      source: 'reconstructed',
+    };
   }
-
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+  return { raw: '', source: 'empty' };
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
@@ -103,16 +145,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   let params: Record<string, string> | undefined;
   try {
-    const rawBody = await readRawBodyStream(req);
+    const { raw: rawBody, source } = await readRawBody(req);
     if (!rawBody) {
-      void log.error('Empty body', undefined, 'body');
+      void log.error('Empty body', { source }, 'body');
       res.status(400).send('Bad request');
       return;
     }
-    void log.info(`rawBody ready (${rawBody.length} bytes)`, undefined, 'body');
+    void log.info(`rawBody ready (${rawBody.length} bytes, source=${source})`, undefined, 'body');
 
-    if (!verifySlackSignature(req, rawBody)) {
-      void log.error('Invalid signature', undefined, 'sig');
+    const sig = verifySlackSignature(req, rawBody);
+    if (!sig.ok) {
+      void log.error(`Invalid signature: ${sig.reason}`, { source, ...sig.detail }, 'sig');
+      // pre-parsed が復元できないケースに備え、500 ではなく 401 を返す
       res.status(401).send('Invalid signature');
       return;
     }
@@ -125,6 +169,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         user_id: params.user_id,
         text_len: (params.text || '').length,
         isPayload: !!params.payload,
+        source,
       },
       'sig'
     );
