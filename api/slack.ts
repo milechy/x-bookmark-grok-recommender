@@ -118,7 +118,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
 
     params = parseBody(rawBody);
-    void log.info('verified', { command: params.command, user_id: params.user_id, text_len: (params.text || '').length }, 'sig');
+    void log.info(
+      'verified',
+      {
+        command: params.command,
+        user_id: params.user_id,
+        text_len: (params.text || '').length,
+        isPayload: !!params.payload,
+      },
+      'sig'
+    );
   } catch (error) {
     void log.error('handler exception', error, 'entry');
     if (!res.headersSent) {
@@ -127,15 +136,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     return;
   }
 
-  // 1) 先に waitUntil を登録（res.end() より前！）
   const capturedParams = params!;
+  const isInteractivity = !!capturedParams.payload;
+
+  // 1) 先に waitUntil を登録（res.end() より前！）
   waitUntil(
     (async () => {
       try {
-        await log.info('bg: dynamic import start', undefined, 'bg');
+        await log.info('bg: dynamic import start', { isInteractivity }, 'bg');
         const mod = await import('../src/slack-process-command.js');
         await log.info('bg: dynamic import done', undefined, 'bg');
-        await mod.processSlackCommand(capturedParams, reqId);
+        if (isInteractivity) {
+          await mod.processSlackInteractivity(capturedParams.payload, reqId);
+        } else {
+          await mod.processSlackCommand(capturedParams, reqId);
+        }
         await log.info('bg: done', undefined, 'bg');
       } catch (err) {
         await log.error('bg error', err, 'bg');
