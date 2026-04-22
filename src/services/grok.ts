@@ -1,5 +1,24 @@
 import OpenAI from 'openai';
-import { Recommendation, XBookmark, GrokRankingRequest } from '../types.js';
+import { Recommendation, XBookmark } from '../types.js';
+
+/** Grok の bookmark_id（tweet id または本文冒頭）から XBookmark を解決 */
+function resolveBookmarkByIdOrText(idOrRef: string | undefined, bookmarks: XBookmark[]): XBookmark | undefined {
+  if (!idOrRef) return undefined;
+  const ref = idOrRef.trim();
+  if (!ref) return undefined;
+
+  const byId = bookmarks.find((b) => b.id === ref);
+  if (byId) return byId;
+
+  const byPrefix = bookmarks.find((b) => b.text.startsWith(ref) || ref.startsWith(b.text.slice(0, Math.min(80, b.text.length))));
+  if (byPrefix) return byPrefix;
+
+  const head = ref.slice(0, 24);
+  if (head.length > 2) {
+    return bookmarks.find((b) => b.text.includes(ref) || b.text.includes(head));
+  }
+  return undefined;
+}
 
 export class GrokService {
   private client: OpenAI;
@@ -40,48 +59,50 @@ export class GrokService {
 
     const bookmarksText = JSON.stringify(bookmarkList, null, 2);
 
-    const systemPrompt = `あなたは優秀なブックマーク推薦アシスタントです。
-ユーザーのクエリに対して、提供された${limitedBookmarks.length}件のブックマークから**本当に関連性の高いものだけ**を厳しく選んでください。
+    const systemPrompt = `あなたは厳しくて優秀なパーソナルブックマーク推薦アシスタントです。
+
+ユーザーの長めの「クエリ」（アイデアや要件）と、提供されたブックマーク群から、**本当に価値のあるものだけを厳選**して推薦してください。
 
 重要なルール：
-- 関連度スコアは0〜100の整数で、**ばらつきを大きくつける**（本当にマッチするものは80以上、微妙なものは50以下にする）。
-- 同じような内容のブックマークは重複を避け、多様性を出す。
-- クエリとの関連性を具体的に理由付けして評価。
-- 上位8件のみをJSONで返し、関連度が高い順にソート。
+- 関連度スコア（0〜100）は大きくばらつきをつける。本当に深くマッチするものは85〜98、普通レベルは70〜84、微妙なものは65以下にする。
+- 各推薦に対して、**「クエリのどの部分にどう合っているか」**を具体的にコメントする。
+  - クエリの具体的な言葉や意図を引用しながら説明する（例：「クエリの『既存のチャットアプリにエージェントを埋め込む』という部分に強く一致」）。
+  - なぜこのブックマークが役立つのか、実用的価値を1〜2文で明確に述べる。
+- 同じような内容のブックマークは避け、異なる角度（技術、事例、注意点、ツールなど）から多様性を出す。
+- クエリとの関連性が薄いものは上位に出さない。
 
-関連度の基準:
-- 95-100: 完璧に一致、クエリの核心を捉えている
-- 80-94: 強く関連、主要な要素を含む
-- 60-79: 部分的に関連
-- 40-59: 少し関連
-- <40: 無関係（選ばない）
+出力は必ず以下のJSON形式のみで返してください。他の説明文は一切出力しないこと。
 
-出力は必ず以下のJSON形式で（追加のテキストは一切含めない）：
 {
   "recommendations": [
     {
-      "bookmark_id": "...",
+      "bookmark_id": "ブックマークの識別子またはテキスト冒頭",
       "score": 92,
-      "reason": "クエリの内容と完全に一致する具体的な技術事例が記載されている",
-      "relevance_explanation": "詳細な説明"
+      "reason": "クエリの『AIエージェントをSlackやiMessageに直接組み込む』という核心に完全にマッチ。Hermes Agentが既存チャット内でAgentを動作させる実装例として非常に参考になる。",
+      "relevance_explanation": "ユーザーは『新しいアプリをインストールせずに日常のチャット内でエージェントを使いたい』と述べている。このブックマークはSpectrumやHermesの統合手法と具体的な技術スタックを紹介しており、すぐに参考にできる。"
     }
   ]
-}`;
+}
+`;
 
-    const userPrompt = `クエリ: ${query}
+    const userPrompt = `ユーザーのクエリ：
+${query}
 
-以下のブックマークからおすすめを抽出してください：
+以下のブックマークから、上記のルールで厳選しておすすめを抽出してください：
+
 ${bookmarksText}
 `;
 
+    const model = process.env.GROK_MODEL || 'grok-4.20-reasoning';
+
     try {
       const completion = await this.client.chat.completions.create({
-        model: 'grok-beta',
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: 0.3,
+        temperature: 0.7,
         max_tokens: 4000,
         response_format: { type: 'json_object' },
       });
@@ -115,7 +136,7 @@ ${bookmarksText}
 
       for (const item of items.slice(0, 8)) {
         const id = item.bookmark_id || item.id;
-        const bookmark = limitedBookmarks.find((b) => b.id === id);
+        const bookmark = resolveBookmarkByIdOrText(id, limitedBookmarks);
         if (bookmark) {
           recommendations.push({
             bookmark,
