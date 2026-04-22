@@ -6,6 +6,7 @@ import { sendXLoginDM } from './oauth.js';
 import { storage } from './storage.js';
 import type { XBookmark, Recommendation } from './types.js';
 
+// This import is used in type annotations for Block Kit
 const grokService = new GrokService();
 
 export function registerCommands(app: App) {
@@ -72,7 +73,7 @@ export function registerCommands(app: App) {
         },
       ];
 
-      recommendations.forEach((rec, _index) => {
+      recommendations.forEach((rec, index) => {
         const b = rec.bookmark;
         const scoreColor = rec.score >= 85 ? '🟢' : rec.score >= 70 ? '🟡' : '🔴';
         const excerpt = b.text.length > 180 ? b.text.substring(0, 177) + '...' : b.text;
