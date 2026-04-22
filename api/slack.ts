@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
+import { waitUntil } from '@vercel/functions';
 
 // Verify Slack request signature
 function verifySlackSignature(req: VercelRequest, rawBody: string): boolean {
@@ -252,12 +253,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     const params = parseBody(rawBody);
     console.log(`[Slack] command=${params.command} user=${params.user_id}`);
 
-    // Immediately ack (must be < 3s)
-    res.status(200).send('');
+    // Queue async processing to continue after response is sent
+    // waitUntil keeps the function alive until the promise resolves
+    waitUntil(
+      processCommand(params).catch((err) => {
+        console.error('[Slack] Background processing error:', err);
+      })
+    );
 
-    // Fire and forget - process command async
-    // Note: Vercel keeps function alive until promise resolves (up to maxDuration)
-    await processCommand(params);
+    // Immediately ack (must be < 3s)
+    return res.status(200).send('');
   } catch (error: any) {
     console.error('[Slack handler] Error:', error);
     if (!res.headersSent) {
