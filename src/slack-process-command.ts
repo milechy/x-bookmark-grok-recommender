@@ -578,8 +578,14 @@ async function runBookmarkFlow(
     if (i < recommendations.length - 1) blocks.push({ type: 'divider' });
   });
 
-  // 最後に「もっとこういう視点で絞り込む」アクションを追加
+  // 最後に「もっとこういう視点で絞り込む」「Obsidianに保存」アクションを追加
+  // ※ Obsidian 連携は src/services/obsidian-flow.ts にディスパッチ
   blocks.push({ type: 'divider' });
+  const displayedIds = recommendations
+    .map((r) => r.bookmark.id)
+    .filter(Boolean)
+    .join(',')
+    .slice(0, 1900);
   blocks.push({
     type: 'actions',
     block_id: 'refine_actions',
@@ -590,6 +596,12 @@ async function runBookmarkFlow(
         action_id: 'refine_query',
         // 元クエリを保持（Slack action value は 2000 文字まで）
         value: query.slice(0, 1900),
+      },
+      {
+        type: 'button',
+        text: { type: 'plain_text', text: '📝 Obsidianに保存', emoji: true },
+        action_id: 'obs_save_displayed',
+        value: displayedIds,
       },
     ],
   });
@@ -885,6 +897,21 @@ export async function processSlackCommand(
     }
   }
 
+  // /bookmark-to-obsidian は obsidian-flow に委譲（既存の /bookmark フローは無変更）
+  if (command === '/bookmark-to-obsidian') {
+    try {
+      const { processObsidianCommand } = await import('./services/obsidian-flow.js');
+      await processObsidianCommand(params, log.reqId);
+    } catch (e) {
+      await log.error('processObsidianCommand dispatch failed', e, 'obs');
+      await sendDelayedResponse(response_url, {
+        response_type: 'ephemeral',
+        text: `❌ Obsidian連携でエラー: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+    return;
+  }
+
   const responder = makeSlashResponder(channel_id, user_id, response_url);
 
   try {
@@ -977,6 +1004,17 @@ export async function processSlackInteractivity(payloadStr: string, reqId?: stri
     const action = payload.actions?.[0];
     const trigger_id: string | undefined = payload.trigger_id;
     const user_id: string = payload.user?.id;
+
+    // Obsidian 関連のアクション（obs_*）は obsidian-flow に委譲
+    if (typeof action?.action_id === 'string' && action.action_id.startsWith('obs_')) {
+      try {
+        const { processObsidianAction } = await import('./services/obsidian-flow.js');
+        await processObsidianAction(payload, log.reqId);
+      } catch (e) {
+        await log.error('processObsidianAction dispatch failed', e, 'obs');
+      }
+      return;
+    }
 
     if (action?.action_id === 'refine_query' && trigger_id) {
       const original = (action.value || '').toString();
