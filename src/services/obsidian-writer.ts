@@ -33,6 +33,11 @@ export interface ObsidianWriteOptions {
   folder?: string;
   /** 上書きを禁止するか（GitHub モードのみ意味あり）。デフォルト false */
   noOverwrite?: boolean;
+  /**
+   * 1 件の書き込みが成功するたびに呼ばれる。タイムアウト時の部分成功を
+   * 永続化（KV 等）するのに使う。エラーは握りつぶす（失敗してもメイン処理は継続）。
+   */
+  onWritten?: (entry: { tweetId: string; path: string }) => Promise<void> | void;
 }
 
 export interface ObsidianWriteResult {
@@ -143,7 +148,22 @@ export function detectObsidianMode(): ObsidianMode {
 /* Writers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-async function writeLocal(notes: BuiltNote[]): Promise<ObsidianWriteResult> {
+async function safeOnWritten(
+  cb: ObsidianWriteOptions['onWritten'],
+  entry: { tweetId: string; path: string }
+): Promise<void> {
+  if (!cb) return;
+  try {
+    await cb(entry);
+  } catch (e) {
+    console.warn('[obsidian-writer] onWritten callback failed', e);
+  }
+}
+
+async function writeLocal(
+  notes: BuiltNote[],
+  onWritten?: ObsidianWriteOptions['onWritten']
+): Promise<ObsidianWriteResult> {
   const root = process.env.OBSIDIAN_VAULT_PATH;
   if (!root) {
     return {
@@ -159,7 +179,9 @@ async function writeLocal(notes: BuiltNote[]): Promise<ObsidianWriteResult> {
       const fullPath = path.join(root, n.relPath);
       await fs.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.writeFile(fullPath, n.content, 'utf8');
-      written.push({ tweetId: n.tweetId, path: fullPath });
+      const entry = { tweetId: n.tweetId, path: fullPath };
+      written.push(entry);
+      await safeOnWritten(onWritten, entry);
     } catch (e) {
       failed.push({ tweetId: n.tweetId, error: e instanceof Error ? e.message : String(e) });
     }
@@ -169,7 +191,7 @@ async function writeLocal(notes: BuiltNote[]): Promise<ObsidianWriteResult> {
 
 async function writeGitHub(
   notes: BuiltNote[],
-  opts: { noOverwrite?: boolean }
+  opts: { noOverwrite?: boolean; onWritten?: ObsidianWriteOptions['onWritten'] }
 ): Promise<ObsidianWriteResult> {
   const repo = process.env.OBSIDIAN_GITHUB_REPO!;
   const token = process.env.OBSIDIAN_GITHUB_TOKEN!;
@@ -224,7 +246,9 @@ async function writeGitHub(
         failed.push({ tweetId: n.tweetId, error: `GitHub PUT ${put.status}: ${t.slice(0, 200)}` });
         continue;
       }
-      written.push({ tweetId: n.tweetId, path: n.relPath });
+      const entry = { tweetId: n.tweetId, path: n.relPath };
+      written.push(entry);
+      await safeOnWritten(opts.onWritten, entry);
     } catch (e) {
       failed.push({ tweetId: n.tweetId, error: e instanceof Error ? e.message : String(e) });
     }
@@ -244,8 +268,12 @@ export async function writeBookmarksToObsidian(
   const notes = options.bookmarks.map((b) => buildNote(b, folder, options.query));
   const mode = detectObsidianMode();
 
-  if (mode === 'local') return writeLocal(notes);
-  if (mode === 'github') return writeGitHub(notes, { noOverwrite: !!options.noOverwrite });
+  if (mode === 'local') return writeLocal(notes, options.onWritten);
+  if (mode === 'github')
+    return writeGitHub(notes, {
+      noOverwrite: !!options.noOverwrite,
+      onWritten: options.onWritten,
+    });
 
   // slack-upload モード: ファイル本体は呼び出し側が files.uploadV2 する
   return {

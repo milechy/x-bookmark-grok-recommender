@@ -34,11 +34,24 @@ interface UserResult {
   ok: boolean;
   totalFetched?: number;
   newCount?: number;
+  toProcessThisRun?: number;
   written?: number;
   failed?: number;
   mode?: string;
   error?: string;
   paths?: string[];
+  remaining?: number;
+  backfilled?: number;
+}
+
+const DEFAULT_PER_RUN_LIMIT = 50;
+
+function getPerRunLimit(): number {
+  const raw = process.env.CRON_MAX_PER_RUN;
+  if (!raw) return DEFAULT_PER_RUN_LIMIT;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_PER_RUN_LIMIT;
+  return n;
 }
 
 function isAuthorized(req: VercelRequest): boolean {
@@ -82,11 +95,98 @@ async function notifySlackDM(
   }
 }
 
+/**
+ * vault (GitHub) の 00_Inbox/X-Bookmarks/ にある既存ファイルから tweet ID を抽出。
+ * ファイル名形式 "YYYY-MM-DD-<TweetID>.md" を前提。
+ */
+async function listExistingTweetIdsInVault(): Promise<{
+  ok: boolean;
+  ids: string[];
+  reason?: string;
+}> {
+  const repo = process.env.OBSIDIAN_GITHUB_REPO;
+  const token = process.env.OBSIDIAN_GITHUB_TOKEN;
+  const branch = process.env.OBSIDIAN_GITHUB_BRANCH || 'main';
+  const folder = process.env.OBSIDIAN_NOTE_FOLDER || '00_Inbox/X-Bookmarks';
+  if (!repo || !token) {
+    return { ok: false, ids: [], reason: 'GITHUB env not set' };
+  }
+  const url = `https://api.github.com/repos/${repo}/contents/${encodeURI(folder)}?ref=${encodeURIComponent(branch)}`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'founderos-v2',
+    },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    return {
+      ok: false,
+      ids: [],
+      reason: `GitHub list ${res.status}: ${t.slice(0, 200)}`,
+    };
+  }
+  const json = (await res.json()) as Array<{ name: string; type: string }>;
+  const re = /-(\d{6,25})\.md$/;
+  const ids: string[] = [];
+  for (const item of json) {
+    if (item.type !== 'file') continue;
+    const m = re.exec(item.name);
+    if (m) ids.push(m[1]);
+  }
+  return { ok: true, ids };
+}
+
 async function syncOneUser(
   slackUserId: string,
-  log: DebugLogger
+  log: DebugLogger,
+  opts: { backfill: boolean; syncExisting: boolean; perRunLimit: number }
 ): Promise<UserResult> {
-  await log.info('cron: sync start', { slackUserId }, 'cron');
+  await log.info(
+    'cron: sync start',
+    {
+      slackUserId,
+      backfill: opts.backfill,
+      syncExisting: opts.syncExisting,
+      perRunLimit: opts.perRunLimit,
+    },
+    'cron'
+  );
+
+  // -------------------- syncExisting モード --------------------
+  // vault に既に存在するノートだけを imported に登録（X API ヒットなし、書き込みなし）
+  if (opts.syncExisting) {
+    const r = await listExistingTweetIdsInVault();
+    if (!r.ok) {
+      await log.error(
+        'cron: syncExisting failed',
+        { slackUserId, reason: r.reason },
+        'cron'
+      );
+      return { slackUserId, ok: false, error: r.reason };
+    }
+    if (r.ids.length > 0) {
+      await addImportedIds(slackUserId, r.ids);
+    }
+    await log.info(
+      'cron: syncExisting done',
+      { slackUserId, registered: r.ids.length },
+      'cron'
+    );
+    await notifySlackDM(
+      slackUserId,
+      `📥 vault 既存ノート *${r.ids.length}* 件を「取り込み済み」として KV に登録しました\nこれ以降の cron は、これらは再取り込みされません。残りは順次取り込まれます。`,
+      log
+    );
+    return {
+      slackUserId,
+      ok: true,
+      backfilled: r.ids.length,
+    };
+  }
+  // ------------------------------------------------------------
 
   const tokens = await storage.getUserTokens(slackUserId);
   if (!tokens) {
@@ -96,12 +196,38 @@ async function syncOneUser(
   const x = new XService(tokens.xAccessToken, slackUserId);
   let bookmarks: Awaited<ReturnType<XService['getAllBookmarks']>>;
   try {
-    bookmarks = await x.getAllBookmarks(true, slackUserId);
+    // バックフィル時はキャッシュ流用で十分（X API を再ヒットしない）
+    bookmarks = await x.getAllBookmarks(!opts.backfill, slackUserId);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await log.error('cron: fetch bookmarks failed', { slackUserId, msg }, 'cron');
     return { slackUserId, ok: false, error: `fetch failed: ${msg}` };
   }
+
+  // -------------------- backfill モード --------------------
+  if (opts.backfill) {
+    const allIds = bookmarks.map((b) => b.id);
+    if (allIds.length > 0) {
+      await addImportedIds(slackUserId, allIds);
+    }
+    await log.info(
+      'cron: backfill done',
+      { slackUserId, backfilled: allIds.length },
+      'cron'
+    );
+    await notifySlackDM(
+      slackUserId,
+      `✅ バックフィル完了: 既存 *${allIds.length}* 件を「取り込み済み」として登録しました\n明日以降の cron はこれより新しいブックマークだけを Obsidian に書き込みます。`,
+      log
+    );
+    return {
+      slackUserId,
+      ok: true,
+      totalFetched: bookmarks.length,
+      backfilled: allIds.length,
+    };
+  }
+  // ---------------------------------------------------------
 
   const imported = await getImportedIds(slackUserId);
   const newOnes = bookmarks.filter((b) => !imported.has(b.id));
@@ -126,18 +252,35 @@ async function syncOneUser(
     };
   }
 
+  // per-run 上限を適用（タイムアウト防止）
+  const toProcess = newOnes.slice(0, opts.perRunLimit);
+  const remaining = newOnes.length - toProcess.length;
+
+  await log.info(
+    'cron: processing slice',
+    {
+      slackUserId,
+      newCount: newOnes.length,
+      perRunLimit: opts.perRunLimit,
+      toProcess: toProcess.length,
+      remaining,
+    },
+    'cron'
+  );
+
   let result;
   try {
-    result = await writeBookmarksToObsidian({ bookmarks: newOnes });
+    result = await writeBookmarksToObsidian({
+      bookmarks: toProcess,
+      // 1 件 commit 成功するたびに imported に追加（タイムアウトしても部分成功は確実に記録される）
+      onWritten: async (entry) => {
+        await addImportedIds(slackUserId, [entry.tweetId]);
+      },
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await log.error('cron: obsidian write failed', { slackUserId, msg }, 'cron');
     return { slackUserId, ok: false, error: `obsidian write failed: ${msg}` };
-  }
-
-  const writtenIds = result.written.map((w) => w.tweetId);
-  if (writtenIds.length > 0) {
-    await addImportedIds(slackUserId, writtenIds);
   }
 
   await log.info(
@@ -148,11 +291,12 @@ async function syncOneUser(
       newCount: newOnes.length,
       written: result.written.length,
       failed: result.failed.length,
+      remaining,
     },
     'cron'
   );
 
-  // Slack DM で通知（slack-upload モードはファイルアップロードが必要なのでスキップ）
+  // Slack DM で通知（slack-upload モードはスキップ）
   if (result.mode !== 'slack-upload' && result.written.length > 0) {
     const summaryLines = [
       `🌅 *おはようございます。新規ブックマーク ${result.written.length} 件を Obsidian に取り込みました*`,
@@ -165,6 +309,11 @@ async function syncOneUser(
     if (result.failed.length > 0) {
       summaryLines.push(`⚠️ 失敗 ${result.failed.length} 件`);
     }
+    if (remaining > 0) {
+      summaryLines.push(
+        `📦 残り未取り込み ${remaining} 件は次回以降の cron で処理されます (上限/回 ${opts.perRunLimit})`
+      );
+    }
     await notifySlackDM(slackUserId, summaryLines.join('\n'), log);
   }
 
@@ -173,8 +322,10 @@ async function syncOneUser(
     ok: true,
     totalFetched: bookmarks.length,
     newCount: newOnes.length,
+    toProcessThisRun: toProcess.length,
     written: result.written.length,
     failed: result.failed.length,
+    remaining,
     mode: modeLabel,
     paths: result.written.map((w) => w.path),
   };
@@ -202,12 +353,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  await log.info('cron: bookmark-sync start', { targetUsers, reqId }, 'cron');
+  // クエリパラメータ
+  const isTrue = (v: unknown) => v === '1' || v === 'true';
+  const backfill = isTrue(req.query.backfill);
+  const syncExisting = isTrue(req.query.syncExisting);
+  const perRunOverride = parseInt((req.query.limit as string | undefined) ?? '', 10);
+  const perRunLimit = Number.isFinite(perRunOverride) && perRunOverride > 0
+    ? perRunOverride
+    : getPerRunLimit();
+
+  await log.info(
+    'cron: bookmark-sync start',
+    { targetUsers, reqId, backfill, syncExisting, perRunLimit },
+    'cron'
+  );
 
   const results: UserResult[] = [];
   for (const userId of targetUsers) {
     try {
-      const r = await syncOneUser(userId, log);
+      const r = await syncOneUser(userId, log, { backfill, syncExisting, perRunLimit });
       results.push(r);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -219,11 +383,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const summary = {
     reqId,
     timestamp: new Date().toISOString(),
+    backfill,
+    syncExisting,
+    perRunLimit,
     targetCount: targetUsers.length,
     successCount: results.filter((r) => r.ok).length,
     failureCount: results.filter((r) => !r.ok).length,
     totalNewBookmarks: results.reduce((s, r) => s + (r.newCount ?? 0), 0),
     totalWritten: results.reduce((s, r) => s + (r.written ?? 0), 0),
+    totalRemaining: results.reduce((s, r) => s + (r.remaining ?? 0), 0),
+    totalBackfilled: results.reduce((s, r) => s + (r.backfilled ?? 0), 0),
     results,
   };
 
