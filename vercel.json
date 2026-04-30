@@ -9,6 +9,16 @@
     },
     "api/oauth/callback.ts": {
       "maxDuration": 15
+    },
+    "api/cron/bookmark-sync.ts": {
+      "maxDuration": 60,
+      "memory": 1024
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/bookmark-sync",
+      "schedule": "0 21 * * *"
+    }
+  ]
 }
